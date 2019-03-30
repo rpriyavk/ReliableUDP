@@ -1,0 +1,319 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..15a7a58
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,4 @@
++bin
++obj
++tags
++cscope*
+diff --git a/Makefile b/Makefile
+index 057a6a2..2e4ee0d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,8 +1,13 @@
+ SRC_DIR=src
+ BIN_DIR=bin
+ OBJ_DIR=obj
++TEST_DIR=test
+ STATIC_LIB=$(BIN_DIR)/librudp.a
+-TARGET=$(STATIC_LIB)
++RUDP_TEST_PREFIX=rudp_
++RUDP_CLIENT=rudp_client
++RUDP_SERVER=rudp_server
++TEST_EXE=$(BIN_DIR)/$(RUDP_CLIENT) $(BIN_DIR)/$(RUDP_SERVER)
++TARGET=$(STATIC_LIB) $(TEST_EXE)
+ 
+ SRCS=$(wildcard $(SRC_DIR)/*.c)
+ OBJS=$(addprefix $(OBJ_DIR)/,$(SRCS:.c=.o))
+@@ -13,6 +18,8 @@ RM = rm
+ 
+ CFLAGS = -g -ggdb -O0 -Wall -Werror -I include
+ 
++LDFLAGS = -L $(BIN_DIR) -lrudp
++
+ .PHONEY: all clean init_setup
+ 
+ all: init_setup $(TARGET)
+@@ -27,6 +34,15 @@ $(OBJ_DIR)/%.o:%.c
+ $(STATIC_LIB):$(OBJS)
+ 	$(AR) r $@ $^
+ 
++$(OBJ_DIR)/$(RUDP_TEST_PREFIX)%.o:$(TEST_DIR)/$(RUDP_TEST_PREFIX)%.c
++	$(CC) $(CFLAGS) -o $@ -c $<
++
++$(BIN_DIR)/$(RUDP_CLIENT):$(OBJ_DIR)/$(RUDP_CLIENT).o
++	$(CC) $< $(LDFLAGS) -o $@
++
++$(BIN_DIR)/$(RUDP_SERVER):$(OBJ_DIR)/$(RUDP_SERVER).o
++	$(CC) $< $(LDFLAGS) -o $@
++
+ clean:
+ 	@$(RM) -rf $(OBJS)
+ 	@$(RM) -rf $(TARGET)
+diff --git a/README.md b/README.md
+index ffd7dea..0a7dc8d 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,15 @@
+ # ReliableUDP
++RUDP is a protocol which runs on top of UDP and makes UDP connection reliable. This is achieved by
++..* A RUDP header is added on top of UDP layer to maintain Connection ID, sequence number, acknowledging sequence number, size of payload, and some flags.
++..* Receiver sends a Acknowledgement msg for the packet it receives.
++..* Sender maintains a send packet list (send buffer), in which it holds the sent packet till it receives ACK. Sender waits for the pre configured timeout for ACK, failing to receive ACK will initiate a retransmission.
++
++# ReliableUDP Header Format
++
+++----+----+----+----+</br>
++|     Con ID        |
+++----+----+----+----+
++|  Seq No | ASeq No |
+++----+----+----+----+
++|  Flags  |   Len   |
+++----+----+----+----+
+diff --git a/include/rudp.h b/include/rudp.h
+index dae7c0c..598fc67 100644
+--- a/include/rudp.h
++++ b/include/rudp.h
+@@ -11,17 +11,23 @@ extern "C" {
+ 
+ typedef struct rudp_st RUDP;
+ 
+-/*RUDP *RUDP_new();
++RUDP *RUDP_new();
+ 
+-int RUDP_bind(RUDP *rudp, const struct sockaddr *addr, socklen_t addrlen)
++int RUDP_bind(RUDP *rudp, const struct sockaddr *addr, socklen_t addrlen);
+ 
+ int RUDP_connect(RUDP *rudp, const struct sockaddr *addr, socklen_t addrlen);
+ 
+ int RUDP_send(RUDP *rudp, const uint8_t *data, uint16_t data_len, int flags);
+ 
++int RUDP_sendto(RUDP *rudp, const uint8_t *data, uint16_t data_len, int flags,
++                const struct sockaddr *dstaddr, socklen_t dstaddrlen);
++
+ int RUDP_recv(RUDP *rudp, uint8_t *buf, uint16_t buf_size, int flags);
+ 
+-void RUDP_close(RUDP *rudp);*/
++int RUDP_recvfrom(RUDP *rudp, uint8_t *buf, uint16_t buf_size, int flags,
++                 struct sockaddr *srcaddr, socklen_t *srcaddrlen);
++
++void RUDP_close(RUDP *rudp);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/test/rudp_client.c b/test/rudp_client.c
+index e69de29..ac9ad6b 100644
+--- a/test/rudp_client.c
++++ b/test/rudp_client.c
+@@ -0,0 +1,86 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <sys/types.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++
++#include "rudp_common.h"
++#include "rudp.h"
++
++RUDP *create_rudp_client()
++{
++    RUDP *rudp;
++
++    rudp = RUDP_new();
++    if (!rudp) {
++        printf("RUDP new failed\n");
++        return NULL;
++    }
++
++    return rudp;
++}
++
++int do_data_transfer(RUDP *rudp, struct sockaddr_in *servaddr)
++{
++    uint8_t buf[MAX_BUF_SIZE] = {0};
++    struct sockaddr_in peeraddr = {0};
++    socklen_t peeraddr_len = sizeof(peeraddr);
++    int ret;
++
++    ret = RUDP_sendto(rudp, (const uint8_t *)"Hi Server", sizeof("Hi Server"),
++                      0, (struct sockaddr *)servaddr, sizeof(*servaddr));
++    if (ret <= 0) {
++        printf("RUDP sendto failed\n");
++        return -1;
++    }
++    printf("Send succeeded %d\n", ret);
++
++    ret = RUDP_recvfrom(rudp, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&peeraddr, &peeraddr_len);
++    if (ret <= 0) {
++        printf("RUDP recvfrom failed\n");
++        return -1;
++    }
++    printf("Received data[%d]: %s\n", ret, buf);
++
++    return 0;
++}
++
++int do_rudp_client(const char *serv_ip, uint16_t serv_port)
++{
++    struct sockaddr_in servaddr;
++    RUDP *rudp;
++
++    servaddr.sin_family = AF_INET;
++    if (inet_aton(serv_ip, &servaddr.sin_addr) != 1) {
++        printf("inet_aton failed\n");
++        goto err;
++    }
++    servaddr.sin_port = htons(serv_port);
++
++    rudp = create_rudp_client();
++    if (!rudp) {
++        printf("create rudp failed\n");
++        return -1;
++    }
++    printf("Create client socket succeeded\n");
++
++    if (do_data_transfer(rudp, &servaddr)) {
++        printf("Data transfer failed\n");
++        goto err;
++    }
++    printf("Data transfer succeeded\n");
++
++    RUDP_close(rudp);
++    return 0;
++err:
++    RUDP_close(rudp);
++    return -1;
++}
++
++int main()
++{
++    return do_rudp_client(SERVER_IP, SERVER_PORT);
++}
+diff --git a/test/rudp_common.h b/test/rudp_common.h
+new file mode 100644
+index 0000000..de8167c
+--- /dev/null
++++ b/test/rudp_common.h
+@@ -0,0 +1,16 @@
++#ifndef RUDP_COMMON_H
++#define RUDP_COMMON_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define SERVER_IP "127.0.0.1"
++#define SERVER_PORT 5566
++#define MAX_BUF_SIZE 1024
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/test/rudp_server.c b/test/rudp_server.c
+index e69de29..7df6502 100644
+--- a/test/rudp_server.c
++++ b/test/rudp_server.c
+@@ -0,0 +1,96 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <sys/types.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++
++#include "rudp_common.h"
++#include "rudp.h"
++
++RUDP *create_rudp_server(struct sockaddr_in *servaddr)
++{
++    RUDP *rudp;
++    int ret;
++
++    rudp = RUDP_new();
++    if (!rudp) {
++        printf("RUDP new failed\n");
++        return NULL;
++    }
++
++    ret = RUDP_bind(rudp, (struct sockaddr *)servaddr, sizeof(*servaddr));
++    if (ret != 0) {
++        printf("RUDP bind failed\n");
++        goto err;
++    }
++    return rudp;
++err:
++    RUDP_close(rudp);
++    return NULL;
++}
++
++int do_data_transfer(RUDP *rudp)
++{
++    uint8_t buf[MAX_BUF_SIZE] = {0};
++    struct sockaddr_in peeraddr = {0};
++    socklen_t peeraddr_len = sizeof(peeraddr);
++    int ret;
++
++    ret = RUDP_recvfrom(rudp, buf, sizeof(buf) - 1, 0,
++                       (struct sockaddr *)&peeraddr, &peeraddr_len);
++    if (ret <= 0) {
++        printf("RUDP recvfrom failed\n");
++        return -1;
++    }
++    printf("Received Data[%d]: %s\n", ret, buf);
++
++    ret = RUDP_sendto(rudp, (const uint8_t *)"Hello Client", sizeof("Hello Client"), 0,
++                      (struct sockaddr *)&peeraddr, sizeof(peeraddr));
++    if (ret <= 0) {
++        printf("RUDP sendto failed\n");
++        return -1;
++    }
++    printf("Send data succeeded %d\n", ret);
++
++    return 0;
++}
++
++int do_rudp_client(const char *serv_ip, uint16_t serv_port)
++{
++    struct sockaddr_in servaddr;
++    RUDP *rudp;
++
++    servaddr.sin_family = AF_INET;
++    if (inet_aton(serv_ip, &servaddr.sin_addr) != 1) {
++        printf("inet_aton failed\n");
++        goto err;
++    }
++    servaddr.sin_port = htons(serv_port);
++
++    rudp = create_rudp_server(&servaddr);
++    if (!rudp) {
++        printf("create rudp failed\n");
++        return -1;
++    }
++    printf("Create RUDP server succeeded\n");
++
++    if (do_data_transfer(rudp)) {
++        printf("Data transfer failed\n");
++        goto err;
++    }
++    printf("Data transfer succeeded\n");
++
++    RUDP_close(rudp);
++    return 0;
++err:
++    RUDP_close(rudp);
++    return -1;
++}
++
++int main()
++{
++    return do_rudp_client(SERVER_IP, SERVER_PORT);
++}
